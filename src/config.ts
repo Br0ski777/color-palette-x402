@@ -33,6 +33,52 @@ Do NOT use for image processing -- use media_extract_text_from_image instead. Do
         },
         required: ["color"],
       },
+      outputSchema: {
+          "type": "object",
+          "properties": {
+            "baseColor": {
+              "type": "string",
+              "description": "Input base color (hex)"
+            },
+            "scheme": {
+              "type": "string",
+              "description": "Color scheme used"
+            },
+            "count": {
+              "type": "number",
+              "description": "Number of colors generated"
+            },
+            "colors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "hex": {
+                    "type": "string"
+                  },
+                  "rgb": {
+                    "type": "string"
+                  },
+                  "hsl": {
+                    "type": "string"
+                  },
+                  "css": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "cssVariables": {
+              "type": "string",
+              "description": "CSS custom properties for all colors"
+            }
+          },
+          "required": [
+            "baseColor",
+            "scheme",
+            "colors"
+          ]
+        },
     },
   ],
 };

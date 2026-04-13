@@ -12,6 +12,7 @@ export interface RouteConfig {
   toolName: string;
   toolDescription: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface ApiConfig {
@@ -84,12 +85,14 @@ export function buildPaymentConfig(routes: RouteConfig[], payTo = WALLET_ADDRESS
           info: {
             input: {
               type: "http",
+              method: route.method,
               bodyType: "json",
-              body: {},
+              body: route.inputSchema,
             },
             output: {
               type: "json",
-              example: {},
+              schema: route.outputSchema || { type: "object", description: route.description },
+              example: route.outputSchema ? {} : { success: true },
             },
           },
           schema: {
