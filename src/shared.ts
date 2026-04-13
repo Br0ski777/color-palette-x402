@@ -154,6 +154,24 @@ export function setupDiscovery(app: any, config: ApiConfig) {
   // Register enrichment middleware for 402 responses (adds inputSchema to resource object)
   app.use("/api/*", x402scanEnrichMiddleware(config.routes));
 
+  // /.well-known/mcp/server-card.json — Smithery server discovery
+  app.get("/.well-known/mcp/server-card.json", (c: any) => {
+    const origin = new URL(c.req.url).origin;
+    const tools = config.routes.map((r) => ({
+      name: r.toolName,
+      description: r.toolDescription.slice(0, 200),
+      inputSchema: r.inputSchema,
+    }));
+    return c.json({
+      name: config.name,
+      description: config.description,
+      version: config.version,
+      tools,
+      connections: [{ type: "sse", url: `${origin}/sse` }],
+      configSchema: { type: "object", properties: {} },
+    });
+  });
+
   // /.well-known/x402 discovery endpoint
   app.get("/.well-known/x402", (c: any) => {
     const origin = new URL(c.req.url).origin;
