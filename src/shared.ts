@@ -38,7 +38,6 @@ export function x402scanEnrichMiddleware(routes: RouteConfig[]) {
   return async (c: any, next: any) => {
     await next();
     if (c.res && c.res.status === 402) {
-      // Try both cases for the header name
       const paymentHeader = c.res.headers.get("payment-required") || c.res.headers.get("PAYMENT-REQUIRED");
       if (paymentHeader) {
         try {
@@ -49,22 +48,36 @@ export function x402scanEnrichMiddleware(routes: RouteConfig[]) {
           const schema = schemaMap.get(key);
           if (schema && decoded.resource) {
             decoded.resource.inputSchema = schema;
-            const enriched = Buffer.from(JSON.stringify(decoded)).toString("base64");
-            // Clone response with new header (Hono requires c.res replacement)
-            const clonedBody = await c.res.arrayBuffer();
-            const newRes = new Response(clonedBody, {
-              status: c.res.status,
-              statusText: c.res.statusText,
-            });
-            // Copy all headers
-            c.res.headers.forEach((v: string, k: string) => {
-              newRes.headers.set(k, v);
-            });
-            // Override payment-required with enriched version
-            newRes.headers.set("payment-required", enriched);
-            c.res = undefined as any;  // Force Hono to accept the new response
-            c.res = newRes;
           }
+          const enriched = Buffer.from(JSON.stringify(decoded)).toString("base64");
+
+          // Also mirror x402Version + accepts in the body so x402-fetch / older
+          // x402 clients that parse the body (not the header) can discover
+          // payment requirements. Preserve any existing body keys.
+          let bodyObj: any = {};
+          try {
+            const origBody = await c.res.clone().text();
+            if (origBody && origBody.trim() && origBody.trim() !== "{}") {
+              bodyObj = JSON.parse(origBody);
+            }
+          } catch { /* non-JSON body, overwrite */ }
+          if (decoded.accepts && !bodyObj.accepts) {
+            bodyObj.x402Version = decoded.x402Version ?? 2;
+            bodyObj.accepts = decoded.accepts;
+          }
+          const newBody = JSON.stringify(bodyObj);
+
+          const newRes = new Response(newBody, {
+            status: c.res.status,
+            statusText: c.res.statusText,
+          });
+          c.res.headers.forEach((v: string, k: string) => {
+            if (k.toLowerCase() !== "content-length") newRes.headers.set(k, v);
+          });
+          newRes.headers.set("payment-required", enriched);
+          newRes.headers.set("content-type", "application/json");
+          c.res = undefined as any;
+          c.res = newRes;
         } catch (e: any) {
           console.error("[x402scan-enrich] Error:", e.message);
         }
