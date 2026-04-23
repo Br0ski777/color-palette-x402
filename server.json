@@ -12,7 +12,7 @@
   "remotes": [
     {
       "type": "sse",
-      "url": "https://color-palette-production-8c81.up.railway.app/mcp"
+      "url": "https://color-palette-x402-production.up.railway.app/mcp"
     }
   ]
 }
