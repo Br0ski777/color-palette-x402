@@ -42,6 +42,19 @@ export function x402scanEnrichMiddleware(routes: RouteConfig[]) {
       if (paymentHeader) {
         try {
           const decoded = JSON.parse(Buffer.from(paymentHeader, "base64").toString("utf-8"));
+
+          // Bug 24 fix: Railway terminates TLS upstream — c.req.url is http://, but CDP Bazaar
+          // only indexes https:// resources (verified: 200/200 entries on /discovery use https,
+          // 0 use http). Rewrite resource.url to https using x-forwarded-proto / x-forwarded-host.
+          if (decoded.resource?.url?.startsWith("http://")) {
+            const proto = c.req.header("x-forwarded-proto") || "https";
+            const host = c.req.header("x-forwarded-host") || c.req.header("host");
+            if (host) {
+              const path = new URL(decoded.resource.url).pathname;
+              decoded.resource.url = `${proto}://${host}${path}`;
+            }
+          }
+
           const reqPath = new URL(c.req.url).pathname;
           const reqMethod = c.req.method;
           const key = `${reqMethod} ${reqPath}`;
@@ -86,53 +99,56 @@ export function x402scanEnrichMiddleware(routes: RouteConfig[]) {
   };
 }
 
+// Generate a minimal example payload from a JSON Schema (empty object fallback).
+function exampleFromSchema(schema: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!schema || typeof schema !== "object") return {};
+  const props = (schema as any).properties || {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(props)) {
+    const p: any = v;
+    if (p.example !== undefined) out[k] = p.example;
+    else if (p.default !== undefined) out[k] = p.default;
+    else if (p.type === "string") out[k] = "example";
+    else if (p.type === "number" || p.type === "integer") out[k] = 1;
+    else if (p.type === "boolean") out[k] = true;
+    else if (p.type === "array") out[k] = [];
+    else if (p.type === "object") out[k] = {};
+  }
+  return out;
+}
+
 export function buildPaymentConfig(routes: RouteConfig[], payTo = WALLET_ADDRESS, network = DEFAULT_NETWORK) {
+  // Lazy require to avoid breaking non-server contexts
+  const { declareDiscoveryExtension } = require("@x402/extensions/bazaar") as {
+    declareDiscoveryExtension: (cfg: Record<string, unknown>) => Record<string, unknown>;
+  };
+
   const config: Record<string, unknown> = {};
   for (const route of routes) {
+    // Build proper bazaar extension via official helper — passes CDP strict JSON Schema validation.
+    const exampleInput = exampleFromSchema(route.inputSchema);
+    const exampleOutput = route.outputSchema ? exampleFromSchema(route.outputSchema as any) : undefined;
+
+    const bazaarExt = (route.method === "POST" || route.method === "PUT")
+      ? declareDiscoveryExtension({
+          method: route.method,
+          input: exampleInput,
+          inputSchema: route.inputSchema,
+          bodyType: "json",
+          ...(exampleOutput ? { output: { example: exampleOutput } } : {}),
+        })
+      : declareDiscoveryExtension({
+          method: route.method,
+          input: exampleInput,
+          inputSchema: route.inputSchema,
+          ...(exampleOutput ? { output: { example: exampleOutput } } : {}),
+        });
+
     config[`${route.method} ${route.path}`] = {
       accepts: [{ scheme: "exact", price: route.price, network, payTo }],
       description: route.description,
       mimeType: route.mimeType ?? "application/json",
-      extensions: {
-        bazaar: {
-          info: {
-            input: {
-              type: "http",
-              method: route.method,
-              bodyType: "json",
-              body: route.inputSchema,
-            },
-            output: {
-              type: "json",
-              schema: route.outputSchema || { type: "object", description: route.description },
-              example: route.outputSchema ? {} : { success: true },
-            },
-          },
-          schema: {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            type: "object",
-            properties: {
-              input: {
-                type: "object",
-                properties: {
-                  type: { type: "string", const: "http" },
-                  bodyType: { type: "string", enum: ["json"] },
-                  body: route.inputSchema,
-                },
-                required: ["body"],
-              },
-              output: {
-                type: "object",
-                properties: {
-                  type: { type: "string" },
-                  example: { type: "object" },
-                },
-              },
-            },
-            required: ["input", "output"],
-          },
-        },
-      },
+      extensions: bazaarExt,
     };
   }
   // Mirror POST routes as GET for indexer probes (402index.io)
@@ -307,9 +323,9 @@ export function setupMcp(app: any, config: ApiConfig) {
     });
   });
 
-  // Message endpoint — handles JSON-RPC, responds directly as HTTP JSON
-  // Also accepts requests without sessionId for stateless MCP clients
-  app.post("/message", async (c: any) => {
+  // Streamable HTTP & SSE message handler — handles JSON-RPC, responds directly as HTTP JSON.
+  // Single function attached to both /message (legacy SSE transport) and /mcp (Streamable HTTP).
+  const handleMcpRequest = async (c: any) => {
     const sessionId = c.req.query("sessionId");
     const session = sessionId ? sessions.get(sessionId) : null;
     const req = await c.req.json();
@@ -347,15 +363,26 @@ export function setupMcp(app: any, config: ApiConfig) {
         const route = tool._route;
         const port = process.env.PORT || "3000";
         const args = req.params?.arguments || {};
+
+        // Proxy bypass: if request carries a valid XPAY_PROXY_KEY Bearer token,
+        // call the internal endpoint with the same token so the x402 paywall
+        // middleware lets it through (proxy has already billed the agent).
+        const authHeader = c.req.header("authorization") || "";
+        const xpayKey = process.env.XPAY_PROXY_KEY;
+        const isProxyAuthed = xpayKey && authHeader === `Bearer ${xpayKey}`;
+
         try {
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (isProxyAuthed) headers["Authorization"] = authHeader;
+
           let resp: Response;
           if (route.method === "GET") {
             const qs = new URLSearchParams(args as Record<string, string>).toString();
-            resp = await fetch(`http://localhost:${port}${route.path}${qs ? "?" + qs : ""}`);
+            resp = await fetch(`http://localhost:${port}${route.path}${qs ? "?" + qs : ""}`, { headers });
           } else {
             resp = await fetch(`http://localhost:${port}${route.path}`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers,
               body: JSON.stringify(args),
             });
           }
@@ -388,9 +415,15 @@ export function setupMcp(app: any, config: ApiConfig) {
       } catch {}
     }
 
-    // ALSO return as direct HTTP response (Smithery uses this)
+    // ALSO return as direct HTTP response (Smithery / Streamable HTTP clients use this)
     return c.json(response);
-  });
+  };
 
-  console.log(`[mcp] SSE transport ready — ${tools.length} tools`);
+  // Attach handler on both transports:
+  // - /message : legacy SSE (paired with /sse)
+  // - /mcp     : Streamable HTTP (modern MCP clients, xpay proxy)
+  app.post("/message", handleMcpRequest);
+  app.post("/mcp", handleMcpRequest);
+
+  console.log(`[mcp] SSE + Streamable HTTP ready — ${tools.length} tools`);
 }
