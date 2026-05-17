@@ -58,8 +58,8 @@ async function setupPayments() {
 
     // Coinbase CDP facilitator (83% of x402 market) with PayAI fallback
     const cdpConfig = createFacilitatorConfig(
-      process.env.CDP_API_KEY_ID || "21c4c238-79d7-48bd-a6a5-7f5899ee9864",
-      process.env.CDP_API_KEY_SECRET || "/KBHrViEkTLP1+E4RVZ+tu8hgpDA2bSGqvXDDVB05XkzwwBagztHaCbNDyqiLHPhOS2ZtuCqv6bprTdqs2t13A==",
+      process.env.CDP_API_KEY_ID!,
+      process.env.CDP_API_KEY_SECRET!,
     );
     const coinbaseFacilitator = new HTTPFacilitatorClient(cdpConfig);
     const payaiFacilitator = new HTTPFacilitatorClient({ url: "https://facilitator.payai.network" });
